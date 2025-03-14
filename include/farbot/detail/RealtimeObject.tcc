@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cassert>
+#include <thread>
 
 namespace farbot
 {
@@ -56,14 +57,32 @@ public:
 
     T& nonRealtimeAcquire()
     {
-        nonRealtimeLock.lock();
-        copy.reset (new T (*storage));
+        const auto threadId = std::this_thread::get_id();
+        
+        if (nonRealtimeThreadId == threadId) {
+            // If the current thread already has the lock, just increment the
+            // counter instead of trying to lock again (which would block)
+            ++nonRealtimeCounter;
+        } else {
+            nonRealtimeLock.lock();
+            nonRealtimeThreadId = threadId;
+            nonRealtimeCounter = 1;
+            copy.reset (new T (*storage));
+        }
 
         return *copy.get();
     }
 
     void nonRealtimeRelease()
     {
+        const auto threadId = std::this_thread::get_id();
+
+        if (nonRealtimeThreadId == threadId && --nonRealtimeCounter > 0) {
+            // If the current thread has the lock, decrement the counter
+            // and return if it's not yet 0
+            return;
+        }
+
         T* ptr;
 
         // block until realtime thread is done using the object
@@ -72,6 +91,7 @@ public:
         } while (! pointer.compare_exchange_weak (ptr, copy.get()));
 
         storage = std::move (copy);
+        nonRealtimeThreadId = std::thread::id();
         nonRealtimeLock.unlock();
     }
 
@@ -104,6 +124,8 @@ private:
     std::atomic<T*> pointer;
 
     std::mutex nonRealtimeLock;
+    std::atomic<std::thread::id> nonRealtimeThreadId;
+    int nonRealtimeCounter {0};
     std::unique_ptr<T> copy;
 
     // only accessed by realtime thread
